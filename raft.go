@@ -283,6 +283,9 @@ type Config struct {
 	// This behavior will become unconditional in the future. See:
 	// https://github.com/etcd-io/raft/issues/83
 	StepDownOnRemoval bool
+
+	// raft state tracer
+	TraceLogger TraceLogger
 }
 
 func (c *Config) validate() error {
@@ -427,6 +430,9 @@ type raft struct {
 	// current term. Those will be handled as fast as first log is committed in
 	// current term.
 	pendingReadIndexMessages []pb.Message
+
+	traceLogger     TraceLogger
+	initStateTraced bool
 }
 
 func newRaft(c *Config) *raft {
@@ -456,6 +462,7 @@ func newRaft(c *Config) *raft {
 		disableProposalForwarding:   c.DisableProposalForwarding,
 		disableConfChangeValidation: c.DisableConfChangeValidation,
 		stepDownOnRemoval:           c.StepDownOnRemoval,
+		traceLogger:                 c.TraceLogger,
 	}
 
 	cfg, prs, err := confchange.Restore(confchange.Changer{
@@ -578,11 +585,13 @@ func (r *raft) send(m pb.Message) {
 		// we err on the side of safety and omit a `&& !m.Reject` condition
 		// above.
 		r.msgsAfterAppend = append(r.msgsAfterAppend, m)
+		traceSendMessage(r, &m)
 	} else {
 		if m.To == r.id {
 			r.logger.Panicf("message should not be self-addressed when sending %s", m.Type)
 		}
 		r.msgs = append(r.msgs, m)
+		traceSendMessage(r, &m)
 	}
 }
 
@@ -753,6 +762,8 @@ func (r *raft) appliedSnap(snap *pb.Snapshot) {
 // the commit index changed (in which case the caller should call
 // r.bcastAppend).
 func (r *raft) maybeCommit() bool {
+	defer traceNodeEvent(rsmCommit, r)
+
 	mci := r.prs.Committed()
 	return r.raftLog.maybeCommit(mci, r.Term)
 }
@@ -793,6 +804,9 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 	for i := range es {
 		es[i].Term = r.Term
 		es[i].Index = li + 1 + uint64(i)
+		if es[i].Type == pb.EntryNormal {
+			traceNodeEvent(rsmReplicate, r)
+		}
 	}
 	// Track the size of this uncommitted proposal.
 	if !r.increaseUncommittedSize(es) {
@@ -868,6 +882,8 @@ func (r *raft) becomeFollower(term uint64, lead uint64) {
 	r.lead = lead
 	r.state = StateFollower
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
+
+	traceNodeEvent(rsmBecomeFollower, r)
 }
 
 func (r *raft) becomeCandidate() {
@@ -881,6 +897,8 @@ func (r *raft) becomeCandidate() {
 	r.Vote = r.id
 	r.state = StateCandidate
 	r.logger.Infof("%x became candidate at term %d", r.id, r.Term)
+
+	traceNodeEvent(rsmBecomeCandidate, r)
 }
 
 func (r *raft) becomePreCandidate() {
@@ -904,6 +922,7 @@ func (r *raft) becomeLeader() {
 	if r.state == StateFollower {
 		panic("invalid transition [follower -> leader]")
 	}
+
 	r.step = stepLeader
 	r.reset(r.Term)
 	r.tick = r.tickHeartbeat
@@ -926,6 +945,7 @@ func (r *raft) becomeLeader() {
 	// could be expensive.
 	r.pendingConfIndex = r.raftLog.lastIndex()
 
+	traceNodeEvent(rsmBecomeLeader, r)
 	emptyEnt := pb.Entry{Data: nil}
 	if !r.appendEntry(emptyEnt) {
 		// This won't happen because we just called reset() above.
@@ -1049,6 +1069,9 @@ func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int, rejected 
 }
 
 func (r *raft) Step(m pb.Message) error {
+	traceInitStateOnce(r)
+	traceReceiveMessage(r, &m)
+
 	// Handle the message term, which may result in our stepping down to a follower.
 	switch {
 	case m.Term == 0:
@@ -1273,6 +1296,8 @@ func stepLeader(r *raft, m pb.Message) error {
 				cc = ccc
 			}
 			if cc != nil {
+				traceChangeConfEvent(cc, r)
+
 				alreadyPending := r.pendingConfIndex > r.raftLog.applied
 				alreadyJoint := len(r.prs.Config.Voters[1]) > 0
 				wantsLeaveJoint := len(cc.AsV2().Changes) == 0
@@ -1915,6 +1940,8 @@ func (r *raft) applyConfChange(cc pb.ConfChangeV2) pb.ConfState {
 //
 // The inputs usually result from restoring a ConfState or applying a ConfChange.
 func (r *raft) switchToConfig(cfg tracker.Config, prs tracker.ProgressMap) pb.ConfState {
+	traceConfChangeEvent(cfg, r)
+
 	r.prs.Config = cfg
 	r.prs.Progress = prs
 
