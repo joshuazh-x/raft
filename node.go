@@ -441,7 +441,7 @@ func (n *node) run() {
 			}
 			readyc = nil
 
-			traceNodeEvent(rsmReady, r)
+			traceReady(r)
 		case <-advancec:
 			n.rn.Advance(rd)
 			rd = Ready{}
