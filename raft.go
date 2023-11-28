@@ -762,7 +762,7 @@ func (r *raft) appliedSnap(snap *pb.Snapshot) {
 // the commit index changed (in which case the caller should call
 // r.bcastAppend).
 func (r *raft) maybeCommit() bool {
-	defer traceNodeEvent(rsmCommit, r)
+	defer traceCommit(r)
 
 	mci := r.prs.Committed()
 	return r.raftLog.maybeCommit(mci, r.Term)
@@ -805,7 +805,7 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 		es[i].Term = r.Term
 		es[i].Index = li + 1 + uint64(i)
 		if es[i].Type == pb.EntryNormal {
-			traceNodeEvent(rsmReplicate, r)
+			traceReplicate(r)
 		}
 	}
 	// Track the size of this uncommitted proposal.
@@ -883,7 +883,7 @@ func (r *raft) becomeFollower(term uint64, lead uint64) {
 	r.state = StateFollower
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
 
-	traceNodeEvent(rsmBecomeFollower, r)
+	traceBecomeFollower(r)
 }
 
 func (r *raft) becomeCandidate() {
@@ -898,7 +898,7 @@ func (r *raft) becomeCandidate() {
 	r.state = StateCandidate
 	r.logger.Infof("%x became candidate at term %d", r.id, r.Term)
 
-	traceNodeEvent(rsmBecomeCandidate, r)
+	traceBecomeCandidate(r)
 }
 
 func (r *raft) becomePreCandidate() {
@@ -945,7 +945,7 @@ func (r *raft) becomeLeader() {
 	// could be expensive.
 	r.pendingConfIndex = r.raftLog.lastIndex()
 
-	traceNodeEvent(rsmBecomeLeader, r)
+	traceBecomeLeader(r)
 	emptyEnt := pb.Entry{Data: nil}
 	if !r.appendEntry(emptyEnt) {
 		// This won't happen because we just called reset() above.

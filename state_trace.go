@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build with_tla
+// +build with_tla
+
 package raft
 
 import (
@@ -21,6 +24,8 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 	"go.etcd.io/raft/v3/tracker"
 )
+
+const EnableStateTrace = true
 
 type stateMachineEventType int
 
@@ -159,20 +164,6 @@ type TraceLogger interface {
 	TraceEvent(*TracingEvent)
 }
 
-func traceInitStateOnce(r *raft) {
-	if r.traceLogger == nil {
-		return
-	}
-
-	if r.initStateTraced {
-		return
-	}
-
-	r.initStateTraced = true
-
-	traceNodeEvent(rsmInitState, r)
-}
-
 func traceEvent(evt stateMachineEventType, r *raft, m *raftpb.Message, prop map[string]any) {
 	if r.traceLogger == nil {
 		return
@@ -196,6 +187,58 @@ func traceEvent(evt stateMachineEventType, r *raft, m *raftpb.Message, prop map[
 
 func traceNodeEvent(evt stateMachineEventType, r *raft) {
 	traceEvent(evt, r, nil, nil)
+}
+
+func formatConf(s []uint64) []string {
+	if s == nil {
+		return []string{}
+	}
+
+	r := make([]string, len(s))
+	for i, v := range s {
+		r[i] = strconv.FormatUint(v, 10)
+	}
+	return r
+}
+
+// Use following helper functions to trace specific state and/or
+// transition at corresponding code lines
+func traceInitStateOnce(r *raft) {
+	if r.traceLogger == nil {
+		return
+	}
+
+	if r.initStateTraced {
+		return
+	}
+
+	r.initStateTraced = true
+
+	traceNodeEvent(rsmInitState, r)
+}
+
+func traceReady(r *raft) {
+	traceNodeEvent(rsmReady, r)
+}
+
+func traceCommit(r *raft) {
+	traceNodeEvent(rsmCommit, r)
+}
+
+func traceReplicate(r *raft) {
+	traceNodeEvent(rsmReplicate, r)
+}
+
+func traceBecomeFollower(r *raft) {
+	traceNodeEvent(rsmBecomeFollower, r)
+}
+
+func traceBecomeCandidate(r *raft) {
+	traceNodeEvent(rsmBecomeCandidate, r)
+}
+
+func traceBecomeLeader(r *raft) {
+	traceNodeEvent(rsmBecomeLeader, r)
 }
 
 func traceChangeConfEvent(cci raftpb.ConfChangeI, r *raft) {
@@ -293,16 +336,4 @@ func traceReceiveMessage(r *raft, m *raftpb.Message) {
 
 	time.Sleep(time.Millisecond) // sleep 1ms to reduce time shift impact accross node
 	traceEvent(evt, r, m, nil)
-}
-
-func formatConf(s []uint64) []string {
-	if s == nil {
-		return []string{}
-	}
-
-	r := make([]string, len(s))
-	for i, v := range s {
-		r[i] = strconv.FormatUint(v, 10)
-	}
-	return r
 }
