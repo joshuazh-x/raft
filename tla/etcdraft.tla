@@ -120,6 +120,10 @@ VARIABLE
 candidateVars == <<votesResponded, votesGranted>>
 
 \* The following variables are used only on leaders:
+\* The next entry to send to each follower.
+VARIABLE 
+    \* @type: Int -> (Int -> Int);
+    nextIndex
 \* The latest entry that each follower has acknowledged is the same as the
 \* leader's. This is used to calculate commitIndex on the leader.
 VARIABLE 
@@ -127,7 +131,7 @@ VARIABLE
     matchIndex
 VARIABLE
     pendingConfChangeIndex
-leaderVars == <<matchIndex, pendingConfChangeIndex>>
+leaderVars == <<nextIndex, matchIndex, pendingConfChangeIndex>>
 
 \* @type: Int -> [jointConfig: Seq(Set(int)), learners: Set(int)]
 VARIABLE 
@@ -247,7 +251,8 @@ InitServerVars == /\ currentTerm = [i \in Server |-> IF i \in InitServer THEN 1 
                   /\ votedFor    = [i \in Server |-> Nil]
 InitCandidateVars == /\ votesResponded = [i \in Server |-> {}]
                      /\ votesGranted   = [i \in Server |-> {}]
-InitLeaderVars == /\ matchIndex = [i \in Server |-> [j \in Server |-> 0]]
+InitLeaderVars == /\ nextIndex  = [i \in Server |-> [j \in Server |-> 1]]
+                  /\ matchIndex = [i \in Server |-> [j \in Server |-> 0]]
                   /\ pendingConfChangeIndex = [i \in Server |-> 0]
 InitLogVars == /\ log          = [i \in Server |-> IF i \in InitServer THEN BootstrapLog ELSE <<>>]
                /\ commitIndex  = [i \in Server |-> IF i \in InitServer THEN Cardinality(InitServer) ELSE 0]
@@ -274,6 +279,7 @@ Restart(i) ==
     /\ state'          = [state EXCEPT ![i] = Follower]
     /\ votesResponded' = [votesResponded EXCEPT ![i] = {}]
     /\ votesGranted'   = [votesGranted EXCEPT ![i] = {}]
+    /\ nextIndex'      = [nextIndex EXCEPT ![i] = [j \in Server |-> 1]]
     /\ matchIndex'     = [matchIndex EXCEPT ![i] = [j \in Server |-> 0]]
     /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i] = 0]
     /\ pendingMessages' = EmptyBag
@@ -367,6 +373,8 @@ BecomeLeader(i) ==
     /\ state[i] = Candidate
     /\ votesGranted[i] \in Quorum(GetConfig(i))
     /\ state'      = [state EXCEPT ![i] = Leader]
+    /\ nextIndex'  = [nextIndex EXCEPT ![i] =
+                         [j \in Server |-> Len(log[i]) + 1]]
     /\ matchIndex' = [matchIndex EXCEPT ![i] =
                          [j \in Server |-> IF j = i THEN Len(log[i]) ELSE 0]]
     /\ UNCHANGED <<messageVars, currentTerm, votedFor, pendingConfChangeIndex, candidateVars, logVars, configVars, durableState>>
@@ -422,7 +430,7 @@ AddNewServer(i, j) ==
     /\ ~IsJointConfig(i)
     /\ Replicate(i, [newconf |-> GetConfig(i) \union {j}, learners |-> GetLearners(i)], ConfigEntry)
     /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
-    /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, commitIndex, configVars, durableState>>
+    /\ UNCHANGED <<messageVars, serverVars, candidateVars, nextIndex, matchIndex, commitIndex, configVars, durableState>>
 
 \* Leader i adds a leaner j to the cluster.
 AddLearner(i, j) ==
@@ -432,7 +440,7 @@ AddLearner(i, j) ==
     /\ ~IsJointConfig(i)
     /\ Replicate(i, [newconf |-> GetConfig(i), learners |-> GetLearners(i) \union {j}], ConfigEntry)
     /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
-    /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, commitIndex, configVars, durableState>>
+    /\ UNCHANGED <<messageVars, serverVars, candidateVars, nextIndex, matchIndex, commitIndex, configVars, durableState>>
 
 \* Leader i removes a server j (possibly itself) from the cluster.
 DeleteServer(i, j) ==
@@ -443,7 +451,7 @@ DeleteServer(i, j) ==
     /\ ~IsJointConfig(i)
     /\ Replicate(i, [newconf |-> GetConfig(i) \ {j}, learners |-> GetLearners(i) \ {j}], ConfigEntry)
     /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
-    /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, commitIndex, configVars, durableState>>
+    /\ UNCHANGED <<messageVars, serverVars, candidateVars, nextIndex, matchIndex, commitIndex, configVars, durableState>>
 
 ApplySimpleConfChangeInLeader(i) ==
     /\ state[i] = Leader
@@ -456,7 +464,7 @@ ApplySimpleConfChangeInLeader(i) ==
        ELSE 
             UNCHANGED <<configVars>>
     /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i] = 0]
-    /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, logVars, durableState>>
+    /\ UNCHANGED <<messageVars, serverVars, candidateVars, nextIndex, matchIndex, logVars, durableState>>
     
 Ready(i) ==
     /\ durableState' = currentDurableState
@@ -621,9 +629,12 @@ HandleAppendEntriesRequest(i, j, m) ==
 HandleAppendEntriesResponse(i, j, m) ==
     /\ m.mterm = currentTerm[i]
     /\ \/ /\ m.msuccess \* successful
+          /\ nextIndex'  = [nextIndex  EXCEPT ![i][j] = m.mmatchIndex + 1]
           /\ matchIndex' = [matchIndex EXCEPT ![i][j] = Max({@, m.mmatchIndex})]
           /\ UNCHANGED <<pendingConfChangeIndex>>
        \/ /\ \lnot m.msuccess \* not successful
+          /\ nextIndex' = [nextIndex EXCEPT ![i][j] =
+                               Max({nextIndex[i][j] - 1, 1})]
           /\ UNCHANGED <<leaderVars>>
     /\ Discard(m)
     /\ UNCHANGED <<pendingMessages, serverVars, candidateVars, logVars, configVars, durableState>>
