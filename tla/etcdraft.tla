@@ -22,7 +22,7 @@
 \* This work is licensed under the Creative Commons Attribution-4.0
 \* International License https://creativecommons.org/licenses/by/4.0/
 
-EXTENDS Naturals, Integers, Bags, FiniteSets, Sequences, SequencesExt, FiniteSetsExt, TLC
+EXTENDS Naturals, Integers, Bags, FiniteSets, Sequences, SequencesExt, FiniteSetsExt, BagsExt, TLC
 
 \* The initial and global set of server IDs.
 CONSTANTS InitServer, Server
@@ -140,22 +140,11 @@ configVars == <<config, reconfigCount>>
 VARIABLE 
     durableState
 
-currentDurableState == 
-    [ 
-        currentTerm |-> currentTerm,
-        votedFor |-> votedFor,
-        log |-> [ i \in Server |-> Len(log[i]) ],
-        commitIndex |-> commitIndex,
-        config |-> config
-    ]
-
-
 \* End of per server variables.
 ----
 
 \* All variables; used for stuttering (asserting state hasn't changed).
 vars == <<messageVars, serverVars, candidateVars, leaderVars, logVars, configVars, durableState>>
-systemState == [ log |-> log ]
 
 
 ----
@@ -188,10 +177,19 @@ WithoutMessage(m, msgs) == msgs (-) SetToBag({m})
 SendDirect(m) == 
     pendingMessages' = WithMessage(m, pendingMessages)
 
-\* Move all messages in pendingMessages to messages
-SendPendingMessages ==
-    /\ messages' = pendingMessages (+) messages
-    /\ pendingMessages' = EmptyBag
+\* All pending messages sent from node i
+PendingMessages(i) ==
+    FoldBag(LAMBDA x, y: IF y.msource = i THEN BagAdd(x,y) ELSE x, EmptyBag, pendingMessages)
+
+\* Remove all messages in pendingMessages that were sent from node i
+ClearPendingMessages(i) ==
+    pendingMessages (-) PendingMessages(i)
+
+\* Move all messages which was sent from node i in pendingMessages to messages
+SendPendingMessages(i) ==
+    LET msgs == PendingMessages(i)
+    IN /\ messages' = msgs (+) messages
+       /\ pendingMessages' = pendingMessages (-) msgs
 
 \* Remove a message from the bag of messages. Used when a server is done
 DiscardDirect(m) ==
@@ -204,9 +202,9 @@ ReplyDirect(response, request) ==
 
 \* Default: change when needed
  Send(m) == SendDirect(m)
- Reply(response, request) == ReplyDirect(response, request)
+ Reply(response, request) == ReplyDirect(response, request) 
  Discard(m) == DiscardDirect(m)
-
+     
 MaxOrZero(s) == IF s = {} THEN 0 ELSE Max(s)
 
 GetJointConfig(i) == 
@@ -228,11 +226,23 @@ GetLearners(i) ==
 ApplyConfigUpdate(i, k) ==
     [config EXCEPT ![i]= [jointConfig |-> << log[i][k].value.newconf, {} >>, learners |-> log[i][k].value.learners]]
 
+CommitTo(i, c) ==
+    commitIndex' = [commitIndex EXCEPT ![i] = Max({@, c})]
+
 BootstrapLog ==
     LET prevConf(y) == IF Len(y) = 0 THEN {} ELSE y[Len(y)].value.newconf
     IN FoldSeq(LAMBDA x, y: Append(y, [ term  |-> 1, type |-> ConfigEntry, value |-> [ newconf |-> prevConf(y) \union {x}, learners |-> {} ] ]), <<>>, SetToSeq(InitServer))
 
 CurrentLeaders == {i \in Server : state[i] = Leader}
+
+PersistState(i) == 
+    durableState' = [durableState EXCEPT ![i] = [
+        currentTerm |-> currentTerm[i],
+        votedFor |-> votedFor[i],
+        log |-> log[i],
+        commitIndex |-> commitIndex[i],
+        config |-> config[i]
+    ]]
 
 ----
 \* Define initial values for all variables
@@ -254,7 +264,13 @@ InitLogVars == /\ log          = [i \in Server |-> IF i \in InitServer THEN Boot
 InitConfigVars == /\ config = [i \in Server |-> [ jointConfig |-> IF i \in InitServer THEN <<InitServer, {}>> ELSE <<{}, {}>>, learners |-> {}]]
                   /\ reconfigCount = 0 \* the bootstrap configuraitons are not counted
 InitDurableState == 
-    durableState = currentDurableState
+    durableState = [ i \in Server |-> [
+        currentTerm |-> currentTerm[i],
+        votedFor |-> votedFor[i],
+        log |-> log[i],
+        commitIndex |-> commitIndex[i],
+        config |-> config[i]
+    ]]
 
 Init == /\ InitMessageVars
         /\ InitServerVars
@@ -276,12 +292,12 @@ Restart(i) ==
     /\ votesGranted'   = [votesGranted EXCEPT ![i] = {}]
     /\ matchIndex'     = [matchIndex EXCEPT ![i] = [j \in Server |-> 0]]
     /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i] = 0]
-    /\ pendingMessages' = EmptyBag
-    /\ currentTerm' = [currentTerm EXCEPT ![i] = durableState.currentTerm[i]]
-    /\ commitIndex' = [commitIndex EXCEPT ![i] = durableState.commitIndex[i]]
-    /\ votedFor' = [votedFor EXCEPT ![i] = durableState.votedFor[i]]
-    /\ log' = [log EXCEPT ![i] = SubSeq(@, 1, durableState.log[i])]
-    /\ config' = [config EXCEPT ![i] = durableState.config[i]]
+    /\ pendingMessages' = ClearPendingMessages(i)
+    /\ currentTerm' = [currentTerm EXCEPT ![i] = durableState[i].currentTerm]
+    /\ commitIndex' = [commitIndex EXCEPT ![i] = durableState[i].commitIndex]
+    /\ votedFor' = [votedFor EXCEPT ![i] = durableState[i].votedFor]
+    /\ log' = [log EXCEPT ![i] = durableState[i].log]
+    /\ config' = [config EXCEPT ![i] = durableState[i].config]
     /\ UNCHANGED <<messages, durableState, reconfigCount>>
 
 \* Server i times out and starts a new election.
@@ -317,50 +333,63 @@ RequestVote(i, j) ==
 \* Leader i sends j an AppendEntries request containing entries in [b,e) range.
 \* N.B. range is right open
 \* @type: (Int, Int, <<Int, Int>>, Int) => Bool;
-AppendEntriesInRange(subtype, i, j, range) ==
+AppendEntriesInRangeToPeer(subtype, i, j, range) ==
+    /\ i /= j
     /\ range[1] <= range[2]
     /\ state[i] = Leader
     /\ j \in GetConfig(i) \union GetLearners(i)
-    /\ IF i /= j THEN
-        /\ LET prevLogIndex == range[1] - 1
-            \* The following upper bound on prevLogIndex is unnecessary
-            \* but makes verification substantially simpler.
-            prevLogTerm == IF prevLogIndex > 0 /\ prevLogIndex <= Len(log[i]) THEN
-                                log[i][prevLogIndex].term
-                            ELSE
-                                0
-            \* Send the entries
-            lastEntry == Min({Len(log[i]), range[2]-1})
-            entries == SubSeq(log[i], range[1], lastEntry)
-            commit == IF subtype = "heartbeat" THEN Min({commitIndex[i], matchIndex[i][j]}) ELSE Min({commitIndex[i], lastEntry})
-            IN /\ Send([mtype          |-> AppendEntriesRequest,
-                        msubtype       |-> subtype,
-                        mterm          |-> currentTerm[i],
-                        mprevLogIndex  |-> prevLogIndex,
-                        mprevLogTerm   |-> prevLogTerm,
-                        mentries       |-> entries,
-                        mcommitIndex   |-> commit,
-                        msource        |-> i,
-                        mdest          |-> j])
-               /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, logVars, configVars, durableState>> 
-       ELSE \* etcd leader sends MsgAppResp to itself immediately after appending log entry 
-        /\ Send([mtype           |-> AppendEntriesResponse,
-                 mterm           |-> currentTerm[i],
-                 msuccess        |-> TRUE,
-                 mmatchIndex     |-> Len(log[i]),
-                 msource         |-> i,
-                 mdest           |-> i])
-        /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, logVars, configVars, durableState>>
+    /\ LET 
+        prevLogIndex == range[1] - 1
+        \* The following upper bound on prevLogIndex is unnecessary
+        \* but makes verification substantially simpler.
+        prevLogTerm == IF prevLogIndex > 0 /\ prevLogIndex <= Len(log[i]) THEN
+                            log[i][prevLogIndex].term
+                        ELSE
+                            0
+        \* Send the entries
+        lastEntry == Min({Len(log[i]), range[2]-1})
+        entries == SubSeq(log[i], range[1], lastEntry)
+        commit == IF subtype = "heartbeat" THEN Min({commitIndex[i], matchIndex[i][j]}) ELSE Min({commitIndex[i], lastEntry})
+       IN /\ Send( [mtype          |-> AppendEntriesRequest,
+                    msubtype       |-> subtype,
+                    mterm          |-> currentTerm[i],
+                    mprevLogIndex  |-> prevLogIndex,
+                    mprevLogTerm   |-> prevLogTerm,
+                    mentries       |-> entries,
+                    mcommitIndex   |-> commit,
+                    msource        |-> i,
+                    mdest          |-> j])
+          /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, logVars, configVars, durableState>> 
+
+\* etcd leader sends MsgAppResp to itself immediately after appending log entry 
+AppendEntriesToSelf(i) ==
+    /\ state[i] = Leader
+    /\ Send([mtype           |-> AppendEntriesResponse,
+             msubtype        |-> "app",
+             mterm           |-> currentTerm[i],
+             msuccess        |-> TRUE,
+             mmatchIndex     |-> Len(log[i]),
+             msource         |-> i,
+             mdest           |-> i])
+    /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, logVars, configVars, durableState>>
+
+\* This is an old implementation in raft lib where leader advances its commit index immediately after appending entries to its log.
+\* In one node cluster, this would violate invariant CommittedIsDurableInv which guarantees all committed entries are already persisted in durable storage.
+AppendEntriesToSelfOld(i) ==
+    /\ state[i] = Leader
+    /\ matchIndex' = [ matchIndex EXCEPT ![i][i] = Len(log[i]) ]
+    /\ UNCHANGED <<pendingMessages, messages, serverVars, candidateVars, pendingConfChangeIndex, logVars, configVars, durableState>>
 
 AppendEntries(i, j, range) ==
-    AppendEntriesInRange("app", i, j, range)
+    AppendEntriesInRangeToPeer("app", i, j, range)
 
 Heartbeat(i, j) ==
-    AppendEntriesInRange("heartbeat", i, j, <<1,1>>)
+    \* heartbeat is equivalent to an append-entry request with 0 entry index 1
+    AppendEntriesInRangeToPeer("heartbeat", i, j, <<1,1>>)
 
 SendSnapshot(i, j, index) ==
-    AppendEntriesInRange("snapshot", i, j, <<1,index+1>>)
-    
+    AppendEntriesInRangeToPeer("snapshot", i, j, <<1,index+1>>)
+ 
 \* Candidate i transitions to leader.
 \* @type: Int => Bool;
 BecomeLeader(i) ==
@@ -408,9 +437,8 @@ AdvanceCommitIndex(i) ==
                   Max(agreeIndexes)
               ELSE
                   commitIndex[i]
-            committed == newCommitIndex > commitIndex[i]
        IN
-        /\ commitIndex' = [commitIndex EXCEPT ![i] = newCommitIndex]
+        /\ CommitTo(i, newCommitIndex)
     /\ UNCHANGED <<messageVars, serverVars, candidateVars, leaderVars, log, configVars, durableState>>
 
     
@@ -418,60 +446,58 @@ AdvanceCommitIndex(i) ==
 AddNewServer(i, j) ==
     /\ state[i] = Leader
     /\ j \notin GetConfig(i)
-    /\ pendingConfChangeIndex[i] = 0
     /\ ~IsJointConfig(i)
-    /\ Replicate(i, [newconf |-> GetConfig(i) \union {j}, learners |-> GetLearners(i)], ConfigEntry)
-    /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
+    /\ IF pendingConfChangeIndex[i] = 0 THEN
+            /\ Replicate(i, [newconf |-> GetConfig(i) \union {j}, learners |-> GetLearners(i)], ConfigEntry)
+            /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
+       ELSE 
+            /\ Replicate(i, <<>>, ValueEntry)
+            /\ UNCHANGED <<pendingConfChangeIndex>>
     /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, commitIndex, configVars, durableState>>
 
 \* Leader i adds a leaner j to the cluster.
 AddLearner(i, j) ==
     /\ state[i] = Leader
     /\ j \notin GetConfig(i) \union GetLearners(i)
-    /\ pendingConfChangeIndex[i] = 0
     /\ ~IsJointConfig(i)
-    /\ Replicate(i, [newconf |-> GetConfig(i), learners |-> GetLearners(i) \union {j}], ConfigEntry)
-    /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
+    /\ IF pendingConfChangeIndex[i] = 0 THEN 
+            /\ Replicate(i, [newconf |-> GetConfig(i), learners |-> GetLearners(i) \union {j}], ConfigEntry)
+            /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
+       ELSE 
+            /\ Replicate(i, <<>>, ValueEntry)
+            /\ UNCHANGED <<pendingConfChangeIndex>>
     /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, commitIndex, configVars, durableState>>
 
 \* Leader i removes a server j (possibly itself) from the cluster.
 DeleteServer(i, j) ==
     /\ state[i] = Leader
-    /\ state[j] \in {Follower, Candidate}
     /\ j \in GetConfig(i) \union GetLearners(i)
-    /\ pendingConfChangeIndex[i] = 0
     /\ ~IsJointConfig(i)
-    /\ Replicate(i, [newconf |-> GetConfig(i) \ {j}, learners |-> GetLearners(i) \ {j}], ConfigEntry)
-    /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
+    /\ IF pendingConfChangeIndex[i] = 0 THEN
+            /\ Replicate(i, [newconf |-> GetConfig(i) \ {j}, learners |-> GetLearners(i) \ {j}], ConfigEntry)
+            /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i]=Len(log'[i])]
+       ELSE 
+            /\ Replicate(i, <<>>, ValueEntry)
+            /\ UNCHANGED <<pendingConfChangeIndex>>
     /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, commitIndex, configVars, durableState>>
 
-ApplySimpleConfChangeInLeader(i) ==
-    /\ state[i] = Leader
-    /\ pendingConfChangeIndex[i] > 0
-    /\ pendingConfChangeIndex[i] <= commitIndex[i]
+ApplySimpleConfChange(i) ==
     /\ ~IsJointConfig(i)
-    /\ IF log[i][pendingConfChangeIndex[i]].type = ConfigEntry THEN
-            /\ config' = ApplyConfigUpdate(i, pendingConfChangeIndex[i])
-            /\ reconfigCount' = reconfigCount + 1
-       ELSE 
-            UNCHANGED <<configVars>>
-    /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i] = 0]
-    /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, logVars, durableState>>
+    /\ LET k == SelectLastInSubSeq(log[i], 1, commitIndex[i], LAMBDA x: x.type = ConfigEntry)
+       IN 
+            /\ k > 0
+            /\ k <= commitIndex[i]
+            /\ config' = ApplyConfigUpdate(i, k)
+            /\ IF state[i] = Leader /\ pendingConfChangeIndex[i] >= k THEN 
+                /\ reconfigCount' = reconfigCount + 1
+                /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i] = 0]
+               ELSE UNCHANGED <<reconfigCount, pendingConfChangeIndex>>
+            /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, logVars, durableState>>
     
 Ready(i) ==
-    /\ durableState' = currentDurableState
-    \* In etcd, candidate or follower needs to wait for all pending configuration changes to be applied before sending messages.
-    /\ \/ /\ state[i] \in {Follower, Candidate}
-          /\ LET k == SelectLastInSubSeq(log[i], 1, commitIndex[i], LAMBDA x: x.type = ConfigEntry)
-             IN IF k > 0 THEN 
-                    /\ config' = ApplyConfigUpdate(i, k)
-                    /\ UNCHANGED <<reconfigCount>>
-                ELSE
-                    UNCHANGED <<configVars>>
-       \/ /\ state[i] = Leader
-          /\ UNCHANGED <<configVars>>
-    /\ SendPendingMessages
-    /\ UNCHANGED <<serverVars, leaderVars, candidateVars, logVars>>
+    /\ PersistState(i)
+    /\ SendPendingMessages(i)
+    /\ UNCHANGED <<serverVars, leaderVars, candidateVars, logVars, configVars, logVars>>
 
 BecomeFollowerOfTerm(i, t) ==
     /\ currentTerm'    = [currentTerm EXCEPT ![i] = t]
@@ -535,6 +561,7 @@ RejectAppendEntriesRequest(i, j, m, logOk) ==
           /\ state[i] = Follower
           /\ \lnot logOk
     /\ Reply([mtype           |-> AppendEntriesResponse,
+              msubtype        |-> "app",
               mterm           |-> currentTerm[i],
               msuccess        |-> FALSE,
               mmatchIndex     |-> 0,
@@ -557,11 +584,15 @@ HasNoConflict(i, index, ents) ==
 \* @type: (Int, Int, Int, AEREQT) => Bool;
 AppendEntriesAlreadyDone(i, j, index, m) ==
     /\ \/ index <= commitIndex[i]
-       \/ m.mentries = << >>
-       \/ /\ m.mentries /= << >>
-          /\ m.mprevLogIndex + Len(m.mentries) <= Len(log[i])
-          /\ HasNoConflict(i, index, m.mentries)          
-    /\ commitIndex' = [commitIndex EXCEPT ![i] = IF index <= commitIndex[i] THEN @ ELSE Min({m.mcommitIndex, m.mprevLogIndex+Len(m.mentries)})]
+       \/ /\ index > commitIndex[i]
+          /\ \/ m.mentries = << >>
+             \/ /\ m.mentries /= << >>
+                /\ m.mprevLogIndex + Len(m.mentries) <= Len(log[i])
+                /\ HasNoConflict(i, index, m.mentries)          
+    /\ IF index <= commitIndex[i] THEN 
+            IF m.msubtype = "heartbeat" THEN CommitTo(i, m.mcommitIndex) ELSE UNCHANGED commitIndex
+       ELSE 
+            CommitTo(i, Min({m.mcommitIndex, m.mprevLogIndex+Len(m.mentries)}))
     /\ Reply([  mtype           |-> AppendEntriesResponse,
                 msubtype        |-> m.msubtype,
                 mterm           |-> currentTerm[i],
@@ -583,6 +614,7 @@ ConflictAppendEntriesRequest(i, index, m) ==
 \* @type: (Int, AEREQT) => Bool;
 NoConflictAppendEntriesRequest(i, index, m) ==
     /\ m.mentries /= << >>
+    /\ index > commitIndex[i]
     /\ HasNoConflict(i, index, m.mentries)
     /\ log' = [log EXCEPT ![i] = @ \o SubSeq(m.mentries, Len(@)-index+2, Len(m.mentries))]
     /\ UNCHANGED <<messageVars, serverVars, commitIndex, durableState>>
@@ -590,13 +622,13 @@ NoConflictAppendEntriesRequest(i, index, m) ==
 \* @type: (Int, Int, Bool, AEREQT) => Bool;
 AcceptAppendEntriesRequest(i, j, logOk, m) ==
     \* accept request
-             /\ m.mterm = currentTerm[i]
-             /\ state[i] = Follower
-             /\ logOk
-             /\ LET index == m.mprevLogIndex + 1
-                IN \/ AppendEntriesAlreadyDone(i, j, index, m)
-                   \/ ConflictAppendEntriesRequest(i, index, m)
-                   \/ NoConflictAppendEntriesRequest(i, index, m)
+    /\ m.mterm = currentTerm[i]
+    /\ state[i] = Follower
+    /\ logOk
+    /\ LET index == m.mprevLogIndex + 1
+       IN \/ AppendEntriesAlreadyDone(i, j, index, m)
+          \/ ConflictAppendEntriesRequest(i, index, m)
+          \/ NoConflictAppendEntriesRequest(i, index, m)
 
 \* Server i receives an AppendEntries request from server j with
 \* m.mterm <= currentTerm[i]. This just handles m.entries of length 0 or 1, but
@@ -658,8 +690,8 @@ ReceiveDirect(m) ==
     \/  /\ m.mtype = AppendEntriesRequest
         /\ HandleAppendEntriesRequest(i, j, m)
     \/  /\ m.mtype = AppendEntriesResponse
-        /\  \/ DropStaleResponse(i, j, m)
-            \/ HandleAppendEntriesResponse(i, j, m)
+        /\ \/ DropStaleResponse(i, j, m)
+           \/ HandleAppendEntriesResponse(i, j, m)
 
 Receive(m) == ReceiveDirect(m)
 
@@ -695,7 +727,8 @@ NextAsync ==
     \/ \E i \in Server : BecomeLeader(i)
     \/ \E i \in Server: ClientRequest(i, 0)
     \/ \E i \in Server : AdvanceCommitIndex(i)
-    \/ \E i,j \in Server : \E b,e \in matchIndex[i][j]+1..Len(log[i])+1 : AppendEntries(i, j, <<b,e>>)
+    \/ \E i,j \in Server : \E b,e \in 1..Len(log[i])+1 : AppendEntries(i, j, <<b,e>>)
+    \/ \E i \in Server : AppendEntriesToSelfOld(i)
     \/ \E i,j \in Server : Heartbeat(i, j)
     \/ \E i,j \in Server : \E index \in 1..commitIndex[i] : SendSnapshot(i, j, index)
     \/ \E m \in DOMAIN messages : Receive(m)
@@ -730,7 +763,7 @@ NextDynamic ==
     \/ \E i, j \in Server : AddNewServer(i, j)
     \/ \E i, j \in Server : AddLearner(i, j)
     \/ \E i, j \in Server : DeleteServer(i, j)
-    \/ \E i \in Server : ApplySimpleConfChangeInLeader(i)
+    \/ \E i \in Server : ApplySimpleConfChange(i)
 
 \* The specification must start with the initial state and transition according
 \* to Next.
@@ -838,6 +871,10 @@ LeaderCompletenessInv ==
                 currentTerm[l] > entry.term =>
                 \* have the entry at the same log position
                 log[l][idx] = entry
+
+CommittedIsDurableInv ==
+    \A i \in Server :
+        IsPrefix(Committed(i), durableState[i].log)
 
 -----
 
