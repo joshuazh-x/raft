@@ -140,16 +140,6 @@ configVars == <<config, reconfigCount>>
 VARIABLE 
     durableState
 
-currentDurableState == 
-    [ 
-        currentTerm |-> currentTerm,
-        votedFor |-> votedFor,
-        log |-> [ i \in Server |-> Len(log[i]) ],
-        commitIndex |-> commitIndex,
-        config |-> config
-    ]
-
-
 \* End of per server variables.
 ----
 
@@ -245,6 +235,15 @@ BootstrapLog ==
 
 CurrentLeaders == {i \in Server : state[i] = Leader}
 
+PersistState(i) == 
+    durableState' = [durableState EXCEPT ![i] = [
+        currentTerm |-> currentTerm[i],
+        votedFor |-> votedFor[i],
+        log |-> Len(log[i]),
+        commitIndex |-> commitIndex[i],
+        config |-> config[i]
+    ]]
+
 ----
 \* Define initial values for all variables
 InitMessageVars == /\ messages = EmptyBag
@@ -265,7 +264,13 @@ InitLogVars == /\ log          = [i \in Server |-> IF i \in InitServer THEN Boot
 InitConfigVars == /\ config = [i \in Server |-> [ jointConfig |-> IF i \in InitServer THEN <<InitServer, {}>> ELSE <<{}, {}>>, learners |-> {}]]
                   /\ reconfigCount = 0 \* the bootstrap configuraitons are not counted
 InitDurableState == 
-    durableState = currentDurableState
+    durableState = [ i \in Server |-> [
+        currentTerm |-> currentTerm[i],
+        votedFor |-> votedFor[i],
+        log |-> Len(log[i]),
+        commitIndex |-> commitIndex[i],
+        config |-> config[i]
+    ]]
 
 Init == /\ InitMessageVars
         /\ InitServerVars
@@ -288,11 +293,11 @@ Restart(i) ==
     /\ matchIndex'     = [matchIndex EXCEPT ![i] = [j \in Server |-> 0]]
     /\ pendingConfChangeIndex' = [pendingConfChangeIndex EXCEPT ![i] = 0]
     /\ pendingMessages' = ClearPendingMessages(i)
-    /\ currentTerm' = [currentTerm EXCEPT ![i] = durableState.currentTerm[i]]
-    /\ commitIndex' = [commitIndex EXCEPT ![i] = durableState.commitIndex[i]]
-    /\ votedFor' = [votedFor EXCEPT ![i] = durableState.votedFor[i]]
-    /\ log' = [log EXCEPT ![i] = SubSeq(@, 1, durableState.log[i])]
-    /\ config' = [config EXCEPT ![i] = durableState.config[i]]
+    /\ currentTerm' = [currentTerm EXCEPT ![i] = durableState[i].currentTerm]
+    /\ commitIndex' = [commitIndex EXCEPT ![i] = durableState[i].commitIndex]
+    /\ votedFor' = [votedFor EXCEPT ![i] = durableState[i].votedFor]
+    /\ log' = [log EXCEPT ![i] = SubSeq(@, 1, durableState[i].log)]
+    /\ config' = [config EXCEPT ![i] = durableState[i].config]
     /\ UNCHANGED <<messages, durableState, reconfigCount>>
 
 \* Server i times out and starts a new election.
@@ -483,7 +488,7 @@ ApplySimpleConfChange(i) ==
             /\ UNCHANGED <<messageVars, serverVars, candidateVars, matchIndex, logVars, durableState>>
     
 Ready(i) ==
-    /\ durableState' = currentDurableState
+    /\ PersistState(i)
     /\ SendPendingMessages(i)
     /\ UNCHANGED <<serverVars, leaderVars, candidateVars, logVars, configVars, logVars>>
 
@@ -859,6 +864,11 @@ LeaderCompletenessInv ==
                 currentTerm[l] > entry.term =>
                 \* have the entry at the same log position
                 log[l][idx] = entry
+
+\* Any entry committed by leader shall be persisted already
+CommittedIsDurableInv ==
+    \A i \in Server :
+        state[i] = Leader => commitIndex[i] <= durableState[i].log
 
 -----
 

@@ -3,7 +3,22 @@
 WORKDIR="$(mktemp -d)"
 TOOLDIR="${WORKDIR}/tool"
 STATEDIR="${WORKDIR}/state"
+WORKDIR="$(mktemp -d)"
+TOOLDIR="${WORKDIR}/tool"
+STATEDIR="${WORKDIR}/state"
 FAILFAST=false
+PARALLEL=$(nproc)
+
+function show_usage {
+    echo "usage: validate.sh [-p <parallel>] -s <spec>-c <config> <trace files>">&2
+}
+
+function install_tlaplus {
+    echo -n "Downloading TLA+ tools ... "
+    wget -qN https://nightly.tlapl.us/dist/tla2tools.jar -P ${TOOLDIR}
+    wget -qN https://github.com/tlaplus/CommunityModules/releases/latest/download/CommunityModules-deps.jar -P ${TOOLDIR}
+    echo "done."
+}
 PARALLEL=$(nproc)
 
 function show_usage {
@@ -50,7 +65,17 @@ function validate {
     local tooldir=${5}
     local statedir=${6}
     local name=$(basename $trace .ndjson)
+    local id=${1}
+    local trace=${2}
+    local spec=${3}
+    local config=${4}
+    local tooldir=${5}
+    local statedir=${6}
+    local name=$(basename $trace .ndjson)
 
+    # preprocess log
+    sed -i -E 's/^[^{]+//' ${trace}
+    sort -t":" -k 3 ${trace} -o ${trace}
     # preprocess log
     sed -i -E 's/^[^{]+//' ${trace}
     sort -t":" -k 3 ${trace} -o ${trace}
@@ -64,31 +89,38 @@ function validate {
 }
 
 function show_progress {
-    #tput rc
-    #tput ed
-
-    for ((i=0;i<lines;i++)); do tput cuu1; done
-    tput ed
-
-    scale=2
-    lines=0
+    p=0
+    r=100
+    total=${#trace_files[@]}
+    pending=0
+    running=0
     for i in ${!trace_files[@]}; do
-        echo -n ${trace_files[$i]}
-        lines=$((lines+1))
-        if [ "${result[$i]}" = "success" ]; then
-            echo -e " -" $(colored_text "green" "PASS")
-        elif [ "${result[$i]}" = "fail" ]; then
-            echo -e " -" $(colored_text "red" "FAIL")
-        else
-            p=$((progress[$i]/scale))
-            r=$((100/scale-p))
-            completed=$(printf "%${p}s" | tr " " ">")
-            remaining=$(printf "%${r}s" | tr " " "-")
-            echo 
-            echo -e "  [${completed}${remaining}] ${progress[$i]}%"
-            lines=$((lines+1))
+        if [ "${result[$i]}" = "success" ] && [ "${printed[$i]}" = "" ]; then
+            p=$((p+100))
+            echo -e ${trace_files[$i]} "-" $(colored_text "green" "PASS") "\033[0K"
+            printed[$i]="true"
+        elif [ "${result[$i]}" = "fail" ] && [ "${printed[$i]}" = "" ]; then
+            p=$((p+100))
+            echo -e ${trace_files[$i]} "-" $(colored_text "red" "FAIL") "\033[0K"
+            printed[$i]="true"
+        elif [ "${result[$i]}" = "" ]; then
+            p=$((p+progress[$i]))
+            if [ $((progress[$i])) -gt 0 ]; then
+                running=$((running+1))
+            else 
+                pending=$((pending+1))
+            fi
+        else 
+            p=$((p+100))
         fi 
     done
+    if [ $((running+pending)) -gt 0 ]; then 
+        p=$((p/total))
+        r=$((100-p))
+        completed=$(printf "%${p}s" | tr " " "#")
+        remaining=$(printf "%${r}s" | tr " " ".")
+        echo -ne "  [${completed}${remaining}] running: ${running} pending: $((pending)) progress: ${p}%\r"
+    fi
 }
 
 while getopts :hs:c:p: flag
@@ -98,14 +130,25 @@ do
         c) CONFIG=${OPTARG};;
         p) PARALLEL=${OPTARG};;
         h|*) show_usage; exit 1;; 
+        p) PARALLEL=${OPTARG};;
+        h|*) show_usage; exit 1;; 
     esac
 done
 
 shift $(($OPTIND -1))
 trace_files=("$@")
+printed=()
 progress=()
 result=()
 
+if [ ! "$SPEC" ] || [ ! "$CONFIG" ] || [ ! "$trace_files" ] 
+then
+    show_usage
+    exit 1
+fi
+
+echo "spec: ${SPEC}"
+echo "config: ${CONFIG}"
 if [ ! "$SPEC" ] || [ ! "$CONFIG" ] || [ ! "$trace_files" ] 
 then
     show_usage
@@ -120,20 +163,18 @@ install_tlaplus
 total=${#trace_files[@]}
 SECONDS=0
 
-#tput init
-#tput sc
-
 export -f validate
 while read line; do
     tokens=(${line// / })
     id=${tokens[0]}
     p=${tokens[1]}
     progress[$id]=$p
-    if [ "${p}" = 100 ]; then
+    if [ "${p}" = 100 ] && [ "${result[$id]}" = "" ]; then
         result[$id]="success"
         show_progress
-    elif [ "${p}" = -1 ]; then
+    elif [ "${p}" = -1 ] && [ "${result[$id]}" = "" ]; then
         result[$id]="fail"
+        show_progress
     fi
 
     if [ "${SECONDS}" -ge 2 ]; then
@@ -151,10 +192,13 @@ xargs -I{} -P ${PARALLEL} bash -c 'validate $@' _ {} $SPEC $CONFIG $TOOLDIR $STA
 passed=0
 for s in ${result[@]}; do
     if [ "$s" = "success" ]; then 
+for s in ${result[@]}; do
+    if [ "$s" = "success" ]; then 
         passed=$((passed+1))
     fi
 done
 
+echo -e "$passed of $total trace(s) passed"
 echo -e "$passed of $total trace(s) passed"
 
 if [ "$passed" -lt "$total" ]; then 

@@ -67,7 +67,6 @@ To preserve the causality of events across nodes, run all application instances 
 
 With above example trace logger, validate.sh can be used to validate traces parallelly.
 ```console
-./validate.sh -s ./Traceetcdraft.tla -c ./Traceetcdraft.cfg /tmp/ramdisk/*.ndjson
+./validate.sh -s ./Traceetcdraft.tla -c ./Traceetcdraft.cfg example.ndjson
 ```
-**Note**： Trace validation can take very long time if a trace file contains too many log lines. Environment variable MAX_TRACE can be set to only investigate top N log lines in each trace file.
-
+**Note**： Trace validation can take very long time if a trace file contains too many log lines. We can set environment variable MAX_TRACE to only investigate top N log lines in each trace file.
