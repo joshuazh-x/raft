@@ -229,10 +229,6 @@ ApplyConfigUpdate(i, k) ==
 CommitTo(i, c) ==
     commitIndex' = [commitIndex EXCEPT ![i] = Max({@, c})]
 
-BootstrapLog ==
-    LET prevConf(y) == IF Len(y) = 0 THEN {} ELSE y[Len(y)].value.newconf
-    IN FoldSeq(LAMBDA x, y: Append(y, [ term  |-> 1, type |-> ConfigEntry, value |-> [ newconf |-> prevConf(y) \union {x}, learners |-> {} ] ]), <<>>, SetToSeq(InitServer))
-
 CurrentLeaders == {i \in Server : state[i] = Leader}
 
 PersistState(i) == 
@@ -248,21 +244,17 @@ PersistState(i) ==
 \* Define initial values for all variables
 InitMessageVars == /\ messages = EmptyBag
                    /\ pendingMessages = EmptyBag
-\* etcd is bootstrapped in two ways.
-\* 1. bootstrap a cluster for the first time: server vars are initialized with term 1 and pre-inserted log entries for initial configuration.
-\* 2. adding a new member: server vars are initialized with all state 0
-\* 3. restarting an existing member: all states are loaded from durable storage
-InitServerVars == /\ currentTerm = [i \in Server |-> IF i \in InitServer THEN 1 ELSE 0]
+InitServerVars == /\ currentTerm = [i \in Server |-> 0]
                   /\ state       = [i \in Server |-> Follower]
                   /\ votedFor    = [i \in Server |-> Nil]
 InitCandidateVars == /\ votesResponded = [i \in Server |-> {}]
                      /\ votesGranted   = [i \in Server |-> {}]
 InitLeaderVars == /\ matchIndex = [i \in Server |-> [j \in Server |-> 0]]
                   /\ pendingConfChangeIndex = [i \in Server |-> 0]
-InitLogVars == /\ log          = [i \in Server |-> IF i \in InitServer THEN BootstrapLog ELSE <<>>]
-               /\ commitIndex  = [i \in Server |-> IF i \in InitServer THEN Cardinality(InitServer) ELSE 0]
-InitConfigVars == /\ config = [i \in Server |-> [ jointConfig |-> IF i \in InitServer THEN <<InitServer, {}>> ELSE <<{}, {}>>, learners |-> {}]]
-                  /\ reconfigCount = 0 \* the bootstrap configuraitons are not counted
+InitLogVars == /\ log          = [i \in Server |-> <<>>]
+               /\ commitIndex  = [i \in Server |-> 0]
+InitConfigVars == /\ config = [i \in Server |-> [ jointConfig |-> <<{}, {}>>, learners |-> {}]]
+                  /\ reconfigCount = 0 
 InitDurableState == 
     durableState = [ i \in Server |-> [
         currentTerm |-> currentTerm[i],

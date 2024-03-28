@@ -25,7 +25,7 @@ import (
 	"go.etcd.io/raft/v3/tracker"
 )
 
-const EnableStateTrace = true
+const StateTraceDeployed = true
 
 type stateMachineEventType int
 

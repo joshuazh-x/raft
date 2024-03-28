@@ -16,6 +16,11 @@
 
 EXTENDS etcdraft, Json, IOUtils, Sequences, TLC
 
+\* BootstrapLogs is a set of log indexes that trace validation shall skip.
+\* Usually extended spec will provide this set according to its own bootstrapping logic.
+CONSTANT BootstrapLogs
+
+
 \* raft.pb.go enum MessageType
 RaftMsgType ==
     "MsgApp" :> AppendEntriesRequest @@ "MsgAppResp" :> AppendEntriesResponse @@
@@ -46,6 +51,8 @@ OriginTraceLog ==
 
 TraceLog ==
     TLCEval(IF "MAX_TRACE" \in DOMAIN IOEnv THEN SubSeq(OriginTraceLog, 1, atoi(IOEnv.MAX_TRACE)) ELSE OriginTraceLog)
+
+ASSUME BootstrapLogs \subset 1..Len(TraceLog)
 
 ASSUME PrintT(<< "Trace:", JsonFile, "Length:", Len(TraceLog)>>)
 
@@ -376,7 +383,6 @@ SkipUnusedLogline ==
        \/ LoglineIsEvent("ReduceNextIndex") \* shall not be necessary when this is removed from raft
     /\ UNCHANGED <<vars>>
 
-\* Next actions where each one 
 TraceNextNonReceiveActions ==
     /\ \/ \E i,j \in Server : RequestVoteIfLogged(i, j)
        \/ \E i \in Server : BecomeLeaderIfLogged(i)
@@ -403,8 +409,11 @@ TraceNextReceiveActions ==
         /\ StepToNextTraceIfMessageIsProcessed(m)
 
 TraceNext ==
-    \/ TraceNextNonReceiveActions
-    \/ TraceNextReceiveActions
+    \/ /\ l \in BootstrapLogs 
+       /\ StepToNextTrace
+    \/ /\ l \notin BootstrapLogs
+       /\ \/ TraceNextNonReceiveActions
+          \/ TraceNextReceiveActions
 
 
 TraceSpec ==

@@ -192,17 +192,12 @@ xargs -I{} -P ${PARALLEL} bash -c 'validate $@' _ {} $SPEC $CONFIG $TOOLDIR $STA
 passed=0
 for s in ${result[@]}; do
     if [ "$s" = "success" ]; then 
-for s in ${result[@]}; do
-    if [ "$s" = "success" ]; then 
         passed=$((passed+1))
     fi
 done
 
 echo -e "$passed of $total trace(s) passed"
-echo -e "$passed of $total trace(s) passed"
 
-if [ "$passed" -lt "$total" ]; then 
+if [ $passed -lt $total ]; then 
     exit 1
 fi
-
-

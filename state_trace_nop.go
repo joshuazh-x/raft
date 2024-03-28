@@ -22,7 +22,7 @@ import (
 	"go.etcd.io/raft/v3/tracker"
 )
 
-const EnableStateTrace = false
+const StateTraceDeployed = false
 
 type TraceLogger interface{}
 

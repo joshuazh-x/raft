@@ -270,7 +270,6 @@ func setupNode(c *Config, peers []Peer) *node {
 // Peers must not be zero length; call RestartNode in that case.
 func StartNode(c *Config, peers []Peer) Node {
 	n := setupNode(c, peers)
-	traceInitState(n.rn.raft)
 	go n.run()
 	return n
 }
@@ -285,7 +284,6 @@ func RestartNode(c *Config) Node {
 		panic(err)
 	}
 	n := newNode(rn)
-	traceInitState(n.rn.raft)
 	go n.run()
 	return &n
 }
@@ -442,8 +440,6 @@ func (n *node) run() {
 				rd = Ready{}
 			}
 			readyc = nil
-
-			traceReady(r)
 		case <-advancec:
 			n.rn.Advance(rd)
 			rd = Ready{}

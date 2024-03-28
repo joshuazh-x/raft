@@ -830,6 +830,13 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 		// Drop the proposal.
 		return false
 	}
+	if StateTraceDeployed {
+		for i := range es {
+			if es[i].Type == pb.EntryNormal {
+				traceReplicate(r)
+			}
+		}
+	}
 	// use latest "last" index after truncate/append
 	li = r.raftLog.append(es...)
 	// The leader needs to self-ack the entries just appended once they have

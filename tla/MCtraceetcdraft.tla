@@ -1,4 +1,4 @@
----------- MODULE MCetcdraft ----------
+---------- MODULE MCtraceetcdraft ----------
 \* Copyright 2024 The etcd Authors
 \*
 \* Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,21 +14,16 @@
 \* limitations under the License.
 \*
 
-EXTENDS etcdraft
+EXTENDS Traceetcdraft
 
-CONSTANT ReconfigurationLimit
-ASSUME ReconfigurationLimit \in Nat
-
-CONSTANT MaxTermLimit
-ASSUME MaxTermLimit \in Nat
-
-\* Limit on client requests
-CONSTANT RequestLimit
-ASSUME RequestLimit \in Nat
-
-etcd == INSTANCE etcdraft
+traceetcd == INSTANCE Traceetcdraft
 
 \* Application uses Node (instead of RawNode) will have multiple ConfigEntry entries appended to log in bootstrapping.
+etcdBootstrapLogs == 
+    
+LastBootstrapLog(i) ==
+    SelectInSeq(TraceLog, LAMBDA x: x.event.nid = i /\ x.event.name \in {"InitState", "ApplyConfChange"})
+
 BootstrapLog ==
     LET prevConf(y) == IF Len(y) = 0 THEN {} ELSE y[Len(y)].value.newconf
     IN FoldSeq(LAMBDA x, y: Append(y, [ term  |-> 1, type |-> ConfigEntry, value |-> [ newconf |-> prevConf(y) \union {x}, learners |-> {} ] ]), <<>>, SetToSeq(InitServer))
