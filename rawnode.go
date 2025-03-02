@@ -560,3 +560,11 @@ func (rn *RawNode) ForgetLeader() error {
 func (rn *RawNode) ReadIndex(rctx []byte) {
 	_ = rn.raft.Step(pb.Message{Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: rctx}}})
 }
+
+func (rn *RawNode) GetVotes() map[uint64]bool {
+	votes := make(map[uint64]bool, len(rn.raft.trk.Votes))
+	for k, v := range rn.raft.trk.Votes {
+		votes[k] = v
+	}
+	return votes
+}

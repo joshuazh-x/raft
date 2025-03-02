@@ -39,6 +39,9 @@ type BasicStatus struct {
 	Applied uint64
 
 	LeadTransferee uint64
+
+	LastLogIndex uint64
+	LastLogTerm  uint64
 }
 
 func getProgressCopy(r *raft) map[uint64]tracker.Progress {
@@ -61,6 +64,9 @@ func getBasicStatus(r *raft) BasicStatus {
 	s.HardState = r.hardState()
 	s.SoftState = r.softState()
 	s.Applied = r.raftLog.applied
+	e := r.raftLog.lastEntryID()
+	s.LastLogIndex = e.index
+	s.LastLogTerm = e.term
 	return s
 }
 

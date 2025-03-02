@@ -128,6 +128,10 @@ func IsEmptySnap(sp pb.Snapshot) bool {
 	return sp.Metadata.Index == 0
 }
 
+type CustomCommand interface {
+	Do(rn *RawNode)
+}
+
 // Node represents a node in a raft cluster.
 type Node interface {
 	// Tick increments the internal logical clock for the Node by a single tick. Election
@@ -240,6 +244,8 @@ type Node interface {
 	ReportSnapshot(id uint64, status SnapshotStatus)
 	// Stop performs any necessary termination of the Node.
 	Stop()
+
+	DoCustomCommand(ctx context.Context, cmd CustomCommand) error
 }
 
 type Peer struct {
@@ -305,6 +311,7 @@ type node struct {
 	done       chan struct{}
 	stop       chan struct{}
 	status     chan chan Status
+	cmdc       chan CustomCommand
 
 	rn *RawNode
 }
@@ -324,6 +331,7 @@ func newNode(rn *RawNode) node {
 		done:   make(chan struct{}),
 		stop:   make(chan struct{}),
 		status: make(chan chan Status),
+		cmdc:   make(chan CustomCommand),
 		rn:     rn,
 	}
 }
@@ -446,6 +454,8 @@ func (n *node) run() {
 			advancec = nil
 		case c := <-n.status:
 			c <- getStatus(r)
+		case cmd := <-n.cmdc:
+			cmd.Do(n.rn)
 		case <-n.stop:
 			close(n.done)
 			return
@@ -607,4 +617,15 @@ func (n *node) ForgetLeader(ctx context.Context) error {
 
 func (n *node) ReadIndex(ctx context.Context, rctx []byte) error {
 	return n.step(ctx, pb.Message{Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: rctx}}})
+}
+
+func (n *node) DoCustomCommand(ctx context.Context, cmd CustomCommand) error {
+	select {
+	case n.cmdc <- cmd:
+		return nil
+	case <-n.done:
+		return ErrStopped
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
