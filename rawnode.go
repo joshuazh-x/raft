@@ -562,6 +562,9 @@ func (rn *RawNode) ReadIndex(rctx []byte) {
 }
 
 func (rn *RawNode) GetVotes() map[uint64]bool {
+	if rn.raft.state != StatePreCandidate && rn.raft.state != StateCandidate {
+		return nil
+	}
 	votes := make(map[uint64]bool, len(rn.raft.trk.Votes))
 	for k, v := range rn.raft.trk.Votes {
 		votes[k] = v
