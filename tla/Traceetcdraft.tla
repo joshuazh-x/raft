@@ -55,32 +55,24 @@ TraceServer == TLCEval(FoldSeq(
                             ELSE {x.event.nid},
     {}, TraceLog))
         
-BootstrapLogIndicesForServer(i) ==
-    LET 
-        FirstBootstrapLogIndex == SelectInSeq(TraceLog, LAMBDA x: x.event.nid = i /\ x.event.name \in {"InitState", "BecomeFollower", "ApplyConfChange"})
-        FirstNonBootstrapLogIndex == SelectInSeq(TraceLog, LAMBDA x: x.event.nid = i /\ x.event.name \notin {"InitState", "BecomeFollower", "ApplyConfChange"})
-        LastBootstrapLogIndexUpperBound == IF FirstNonBootstrapLogIndex = 0 THEN Len(TraceLog) ELSE FirstNonBootstrapLogIndex-1
-    IN 
-        { k \in FirstBootstrapLogIndex..LastBootstrapLogIndexUpperBound: TraceLog[k].event.nid = i }
-            
-BootstrapLogIndices == UNION { BootstrapLogIndicesForServer(i): i \in Server }
+BootstrapIndex == [ i \in Server |-> SelectInSeq(TraceLog, LAMBDA  x: x.event.nid = i /\ x.event.name = "Bootstrap") ]         
+BootstrapEntries(i) == FoldSeq(
+    LAMBDA x, y: Append(y, [ term |-> 1, 
+                             type |-> "ConfigEntry", 
+                             value |-> [ newconf |-> ToSet(TraceLog[x].event.prop.cc.newconf), learners |-> {}] ]),
+    <<>>, 
+    SetToSortSeq({j \in DOMAIN TraceLog : /\ j < BootstrapIndex[i] 
+                                          /\ TraceLog[j].event.nid = i 
+                                          /\ TraceLog[j].event.name = "ApplyConfChange"}, <) ) 
 
-LastBootstrapLog == [ i \in Server |-> TraceLog[Max(BootstrapLogIndicesForServer(i))] ]
-
-BootstrappedConfig(i) == 
-    IF LastBootstrapLog[i].event.name = "ApplyConfChange" THEN 
-        ToSet(LastBootstrapLog[i].event.prop.cc.newconf)
-    ELSE 
-        ToSet(LastBootstrapLog[i].event.conf[1])
-
-TraceInitServer == BootstrappedConfig(TraceLog[1].event.nid)
+TraceInitServer == { i \in Server : BootstrapIndex[i] > 0 }
 ASSUME TraceInitServer \subseteq TraceServer   
 
-TraceInitServerVars == /\ currentTerm = [i \in Server |-> LastBootstrapLog[i].event.state.term]
-                       /\ state = [i \in Server |-> LastBootstrapLog[i].event.role]
-                       /\ votedFor = [i \in Server |-> LastBootstrapLog[i].event.state.vote]
-TraceInitLogVars    == /\ log          = [i \in Server |-> [j \in 1..LastBootstrapLog[i].event.log |-> [ term |-> 1, type |-> "ConfigEntry", value |-> [newconf |-> BootstrappedConfig(i), learners |-> {}]]]]
-                       /\ commitIndex  = [i \in Server |-> LastBootstrapLog[i].event.state.commit]
+TraceInitServerVars == /\ currentTerm = [i \in Server |-> IF i \in InitServer THEN 1 ELSE 0]
+                       /\ state = [i \in Server |-> Follower]
+                       /\ votedFor = [i \in Server |-> Nil]
+TraceInitLogVars    == /\ log          = [i \in Server |-> BootstrapEntries(i)]
+                       /\ commitIndex  = [i \in Server |-> Len(log[i])]
 TraceInitConfigVars == 
     /\ config = [i \in Server |-> [ jointConfig |-> <<BootstrappedConfig(i), {}>>, learners |-> {}] ]
     /\ reconfigCount = 0 
@@ -124,6 +116,8 @@ StepToNextTraceIfMessageIsProcessed(msg) ==
             /\ UNCHANGED <<l>>
 
 -------------------------------------------------------------------------------------
+
+LoglineIsBootStrap == l <= BootstrapIndex[logline.event.nid] 
 
 LoglineIsEvent(e) ==
     /\ l <= Len(TraceLog)
@@ -436,12 +430,12 @@ TraceNextReceiveActions ==
         /\ StepToNextTraceIfMessageIsProcessed(m)
 
 TraceNext ==
-    \/ /\ l \in BootstrapLogIndices
-       /\ UNCHANGED <<vars>>
-       /\ StepToNextTrace
-    \/ /\ l \notin BootstrapLogIndices
-       /\ \/ TraceNextNonReceiveActions
-          \/ TraceNextReceiveActions
+    IF LoglineIsBootStrap THEN
+        /\ UNCHANGED <<vars>>
+        /\ StepToNextTrace
+    ELSE
+        \/ TraceNextNonReceiveActions
+        \/ TraceNextReceiveActions
     
 TraceSpec ==
     TraceInit /\ [][TraceNext]_<<l, pl, vars>>

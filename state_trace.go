@@ -30,6 +30,7 @@ type stateMachineEventType int
 
 const (
 	rsmInitState stateMachineEventType = iota
+	rsmBootstrap
 	rsmBecomeCandidate
 	rsmBecomeFollower
 	rsmBecomeLeader
@@ -53,6 +54,7 @@ const (
 func (e stateMachineEventType) String() string {
 	return []string{
 		"InitState",
+		"Bootstrap",
 		"BecomeCandidate",
 		"BecomeFollower",
 		"BecomeLeader",
@@ -204,6 +206,10 @@ func traceInitState(r *raft) {
 	}
 
 	traceNodeEvent(rsmInitState, r)
+}
+
+func traceBootstrap(r *raft) {
+	traceNodeEvent(rsmBootstrap, r)
 }
 
 func traceReady(r *raft) {
