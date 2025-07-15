@@ -42,22 +42,30 @@ etcdInitServerVars  == /\ currentTerm = [i \in Server |-> IF i \in InitServer TH
                        /\ votedFor    = [i \in Server |-> Nil]
 etcdInitLogVars     == /\ log          = [i \in Server |-> IF i \in InitServer THEN BootstrapLog ELSE <<>>]
                        /\ commitIndex  = [i \in Server |-> IF i \in InitServer THEN Cardinality(InitServer) ELSE 0]
+                       /\ applied      = [i \in Server |-> 0]
 etcdInitConfigVars  == /\ config = [i \in Server |-> [ jointConfig |-> IF i \in InitServer THEN <<InitServer, {}>> ELSE <<{}, {}>>, learners |-> {}]]
-                       /\ reconfigCount = 0 \* the bootstrap configuraitons are not counted
+                       /\ appliedConfChange = [i \in Server |-> Len(BootstrapLog)]
 
 \* This file controls the constants as seen below.
 \* In addition to basic settings of how many nodes are to be model checked,
 \* the model allows to place additional limitations on the state space of the program.
 
+\* Check the # of reconfigurations and return true if it is lower than ReconfigurationLimit
+UnderReconfigLimit ==
+    LET leaders == {i \in Server : state[i] = Leader}
+    IN  
+        \E i \in leaders : 
+            /\ \A j \in leaders \ {i} : Len(log[i]) >= Len(log[j])
+            /\ ReconfigurationLimit > FoldSeq(LAMBDA x, y: IF x.type = ConfigEntry THEN 1 ELSE 0, -Cardinality(InitServer), log[i])
 \* Limit the # of reconfigurations to ReconfigurationLimit
 MCAddNewServer(i, j) ==
-    /\ reconfigCount < ReconfigurationLimit
+    /\ UnderReconfigLimit
     /\ etcd!AddNewServer(i, j)
 MCDeleteServer(i, j) ==
-    /\ reconfigCount < ReconfigurationLimit
+    /\ UnderReconfigLimit
     /\ etcd!DeleteServer(i, j)
 MCAddLearner(i, j) ==
-    /\ reconfigCount < ReconfigurationLimit
+    /\ UnderReconfigLimit
     /\ etcd!AddLearner(i, j)
 
 \* Limit the terms that can be reached. Needs to be set to at least 3 to
@@ -103,6 +111,15 @@ MCSend(msg) ==
         /\ n.mtype = AppendEntriesResponse
         /\ msg.mtype = AppendEntriesRequest
     /\ etcd!Send(msg)
+
+\* If there is no new message and no state change, we can skip Advance to reduce state spece
+\* to be explored
+MCReady(i) ==
+    LET rd == ReadyData(args[1])
+    IN 
+        /\ \/ rd.msgs /= EmptyBag
+           \/ DurableStateFromReady(rd) /= durableState[i]
+        /\ Ready(i)
 
 mc_etcdSpec ==   
     /\ Init

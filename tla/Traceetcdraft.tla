@@ -54,40 +54,35 @@ TraceServer == TLCEval(FoldSeq(
                             THEN {x.event.nid, x.event.prop.cc.changes[1].nid} 
                             ELSE {x.event.nid},
     {}, TraceLog))
-        
-BootstrapLogIndicesForServer(i) ==
-    LET 
-        FirstBootstrapLogIndex == SelectInSeq(TraceLog, LAMBDA x: x.event.nid = i /\ x.event.name \in {"InitState", "BecomeFollower", "ApplyConfChange"})
-        FirstNonBootstrapLogIndex == SelectInSeq(TraceLog, LAMBDA x: x.event.nid = i /\ x.event.name \notin {"InitState", "BecomeFollower", "ApplyConfChange"})
-        LastBootstrapLogIndexUpperBound == IF FirstNonBootstrapLogIndex = 0 THEN Len(TraceLog) ELSE FirstNonBootstrapLogIndex-1
-    IN 
-        { k \in FirstBootstrapLogIndex..LastBootstrapLogIndexUpperBound: TraceLog[k].event.nid = i }
-            
-BootstrapLogIndices == UNION { BootstrapLogIndicesForServer(i): i \in Server }
 
-LastBootstrapLog == [ i \in Server |-> TraceLog[Max(BootstrapLogIndicesForServer(i))] ]
+BootstrapIndex == [ i \in Server |-> SelectInSeq(TraceLog, LAMBDA  x: x.event.nid = i /\ x.event.name = "Bootstrap") ]
 
-BootstrappedConfig(i) == 
-    IF LastBootstrapLog[i].event.name = "ApplyConfChange" THEN 
-        ToSet(LastBootstrapLog[i].event.prop.cc.newconf)
-    ELSE 
-        ToSet(LastBootstrapLog[i].event.conf[1])
-
-TraceInitServer == BootstrappedConfig(TraceLog[1].event.nid)
+TraceInitServer == { i \in Server : BootstrapIndex[i] > 0 }
 ASSUME TraceInitServer \subseteq TraceServer   
 
-TraceInitServerVars == /\ currentTerm = [i \in Server |-> LastBootstrapLog[i].event.state.term]
-                       /\ state = [i \in Server |-> LastBootstrapLog[i].event.role]
-                       /\ votedFor = [i \in Server |-> LastBootstrapLog[i].event.state.vote]
-TraceInitLogVars    == /\ log          = [i \in Server |-> [j \in 1..LastBootstrapLog[i].event.log |-> [ term |-> 1, type |-> "ConfigEntry", value |-> [newconf |-> BootstrappedConfig(i), learners |-> {}]]]]
-                       /\ commitIndex  = [i \in Server |-> LastBootstrapLog[i].event.state.commit]
+BootstrapEntries(i) == FoldSeq(
+    LAMBDA x, y: Append(y, [ term |-> 1, 
+                             type |-> "ConfigEntry", 
+                             value |-> [ newconf |-> ToSet(TraceLog[x].event.prop.cc.newconf), learners |-> {}] ]),
+    <<>>, 
+    SetToSortSeq({j \in DOMAIN TraceLog : /\ j < BootstrapIndex[i] 
+                                          /\ TraceLog[j].event.nid = i 
+                                          /\ TraceLog[j].event.name = "ApplyConfChange"}, <) ) 
+
+TraceInitServerVars == /\ currentTerm = [i \in Server |-> IF i \in InitServer THEN 1 ELSE 0]
+                       /\ state = [i \in Server |-> Follower]
+                       /\ votedFor = [i \in Server |-> Nil]
+TraceInitLogVars    == /\ log          = [i \in Server |-> BootstrapEntries(i)]
+                       /\ commitIndex  = [i \in Server |-> Len(log[i])]
+                       /\ applied      = [i \in Server |-> 0]
 TraceInitConfigVars == 
-    /\ config = [i \in Server |-> [ jointConfig |-> <<BootstrappedConfig(i), {}>>, learners |-> {}] ]
-    /\ reconfigCount = 0 
+    /\ config = [i \in Server |-> [ jointConfig |-> <<IF i \in InitServer THEN ToSet(TraceLog[BootstrapIndex[i]].event.conf[1]) ELSE {}, {}>>, learners |-> {}] ]
+    /\ appliedConfChange = [i \in Server |-> Len(log[i])]
                         
 
 -------------------------------------------------------------------------------------
-ConfFromLog(l) == << ToSet(l.event.conf[1]), ToSet(l.event.conf[2]) >>
+ConfFromTrace(l) == << ToSet(l.event.conf[1]), ToSet(l.event.conf[2]) >>
+NewConfFromTrace(l) == << ToSet(l.event.prop.cc.newconf), {} >>
 
 OneMoreMessage(msg) ==
     \/ msg \notin DOMAIN pendingMessages /\ msg \in DOMAIN pendingMessages' /\ pendingMessages'[msg] = 1
@@ -99,29 +94,44 @@ OneLessMessage(msg) ==
 
 -------------------------------------------------------------------------------------
 
+\* In some state, we will restrict the state exploration to only follow the actions in
+\* constrained behavior. This is to reduce state space to be explored.
+VARIABLE behaviorProgress
+
+Ready_PersistState_SendMessages_Behavior(i) == 
+    << "Ready", "PersistState", "SendMessage" >>
+
+StepToNextBehaviorAction(i) ==
+    IF behaviorProgress[i] = Len(Ready_PersistState_SendMessages_Behavior) THEN
+        behaviorProgress' = [behaviorProgress EXCEPT ![i] = 1]
+    ELSE
+        behaviorProgress' = [behaviorProgress EXCEPT ![i] = @ + 1]
+
+IsAllowedBehaviorAction(i, name) ==
+    Ready_PersistState_SendMessages_Behavior[behaviorProgress[i]] = name
+
 VARIABLE l
 logline == TraceLog[l]
-VARIABLE pl
-
 
 TraceInit ==
     /\ l = 1
-    /\ pl = 0
-    /\ logline = TraceLog[l]
+    /\ behaviorProgress = [i \in Server |-> 1]
     /\ Init
 
 StepToNextTrace == 
-    /\ l' = l+1
-    /\ pl' = l
-    /\ l % (Len(TraceLog) \div 100) = 0 => PrintT(<< "Progress %:", (l * 100) \div Len(TraceLog)>>)
-    /\ l' > Len(TraceLog) => PrintT(<< "Progress %:", 100>>)
+    IF behaviorProgress[logline.event.nid] > 1 THEN
+        \* Trace shall stay in current position until all actions
+        \* in the behavior are performed
+        UNCHANGED l
+    ELSE
+        /\ l' = l+1
+        /\ l % (Len(TraceLog) \div 100) = 0 => PrintT(<< "Progress %:", (l * 100) \div Len(TraceLog) >>) 
+        /\ l' > Len(TraceLog) => PrintT(<< "Progress %:", 100>>)
     
 StepToNextTraceIfMessageIsProcessed(msg) ==
     IF OneLessMessage(msg) 
         THEN StepToNextTrace
-        ELSE
-            /\ pl' = l 
-            /\ UNCHANGED <<l>>
+        ELSE UNCHANGED <<l>>
 
 -------------------------------------------------------------------------------------
 
@@ -354,9 +364,19 @@ ApplySimpleConfChangeIfLogged(i) ==
     /\ LoglineIsNodeEvent("ApplyConfChange", i)
     /\ ApplySimpleConfChange(i)
 
-ReadyIfLogged(i) ==
+ReadyBehaviorIfLogged(i) ==
     /\ LoglineIsNodeEvent("Ready", i)
-    /\ Ready(i)
+    /\ \/ /\ IsAllowedBehaviorAction(i, "Ready")
+          /\ Ready(i)
+       \/ /\ IsAllowedBehaviorAction(i, "PersistState")
+          /\ PersistState(i)
+       \/ /\ IsAllowedBehaviorAction(i, "SendMessages")
+          /\ SendMessages(i)
+    /\ StepToNextBehaviorAction
+
+AdvanceIfLogged(i) ==
+    /\ LoglineIsNodeEvent("Advance", i)
+    /\ Advance(i) 
 
 RestartIfLogged(i) ==
     /\ LoglineIsNodeEvent("InitState", i)
@@ -385,7 +405,9 @@ StepDownToFollowerIfLogged(i) ==
 
 \* skip unused logs
 SkipUnusedLogline ==
-    /\ \/ /\ LoglineIsEvent("SendAppendEntriesResponse")
+    /\ \/ /\ l < Len(TraceLog) 
+          /\ l <= BootstrapIndex[logline.event.nid] 
+       \/ /\ LoglineIsEvent("SendAppendEntriesResponse")
           /\ logline.event.msg.from # logline.event.msg.to
        \/ /\ LoglineIsEvent("SendRequestVoteResponse")
           /\ logline.event.msg.from # logline.event.msg.to
@@ -421,7 +443,9 @@ TraceNextNonReceiveActions ==
        \/ /\ LoglineIsEvent("ApplyConfChange")
           /\ \E i \in Server: ApplySimpleConfChangeIfLogged(i)
        \/ /\ LoglineIsEvent("Ready")
-          /\ \E i \in Server: ReadyIfLogged(i)
+          /\ \E i \in Server: ReadyBehaviorIfLogged(i)
+       \/ /\ LoglineIsEvent("Advance")
+          /\ \E i \in Server: AdvanceIfLogged(i)
        \/ /\ LoglineIsEvent("InitState")
           /\ \E i \in Server: RestartIfLogged(i)
        \/ /\ LoglineIsEvent("BecomeFollower")
@@ -444,7 +468,7 @@ TraceNext ==
           \/ TraceNextReceiveActions
     
 TraceSpec ==
-    TraceInit /\ [][TraceNext]_<<l, pl, vars>>
+    TraceInit /\ [][TraceNext]_<<l, behaviorProgress, vars>>
 
 -------------------------------------------------------------------------------------
 
@@ -454,7 +478,7 @@ TraceView ==
      \* appears the second time in the trace.  Put differently,  TraceView  causes TLC to
      \* consider  s_i  and s_j  , where  i  and  j  are the positions of  s  in the trace,
      \* to be different states.
-    <<vars, l>>
+    <<vars, l, behaviorProgress>>
 
 -------------------------------------------------------------------------------------
 
